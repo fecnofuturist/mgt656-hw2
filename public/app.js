@@ -361,7 +361,8 @@
     document.getElementById('traffic-panel').hidden = (modeKey !== 'drive');
 
     if (updateUrl !== false) {
-      history.replaceState(null, '', '/' + (modeKey === 'drive' ? 'drive' : modeKey));
+      // Hash-based so it works when hosted under a subpath (e.g. GitHub Pages).
+      history.replaceState(null, '', '#' + modeKey);
     }
     if (state.origin) renderActiveMode();
   }
