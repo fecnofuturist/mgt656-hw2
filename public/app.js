@@ -368,10 +368,11 @@
   }
 
   function modeFromUrl() {
-    var path = location.pathname.replace(/^\//, '');
+    // Last path segment, so /drive and /mgt656-hw2/drive both work.
+    var seg = location.pathname.split('/').filter(Boolean).pop() || '';
     var hash = location.hash.replace(/^#/, '');
     if (MODES[hash]) return hash;
-    if (MODES[path]) return path;
+    if (MODES[seg]) return seg;
     return 'drive';
   }
 
