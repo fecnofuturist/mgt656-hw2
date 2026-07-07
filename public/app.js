@@ -15,9 +15,6 @@
     fallback: { lat: 38.0316, lon: -122.5477 }
   };
 
-  // Sanity box: a geocode hit must land in Marin County or we ignore it.
-  var MARIN_BOX = { south: 37.85, north: 38.25, west: -122.85, east: -122.35 };
-
   var VALHALLA_URL = 'https://valhalla1.openstreetmap.de/isochrone';
   var NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
 
@@ -49,9 +46,18 @@
     dark:  ['#9ec5f4', '#5598e7', '#2a78d6', '#184f95']
   };
 
+  // Voyager basemap: parks/green space, water, colored roads. Labels come
+  // from a separate tile layer drawn ABOVE the isochrone fills so road and
+  // place names stay readable.
   var TILES = {
-    light: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-    dark:  'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+    light: {
+      base:   'https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}{r}.png',
+      labels: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png'
+    },
+    dark: {
+      base:   'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
+      labels: 'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png'
+    }
   };
   var TILE_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' +
     ' &copy; <a href="https://carto.com/attributions">CARTO</a>' +
@@ -71,7 +77,15 @@
     renderToken: 0            // guards against out-of-order async renders
   };
 
-  var map, tileLayer, isoLayerGroup, homeMarker;
+  var map, tileLayer, labelLayer, isoLayerGroup, homeMarker;
+
+  // fetch() with a hard timeout so a stalled server can't hang the app.
+  function fetchWithTimeout(url, options, timeoutMs) {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+    var opts = Object.assign({}, options, { signal: ctrl.signal });
+    return fetch(url, opts).finally(function () { clearTimeout(timer); });
+  }
 
   // ------------------------------------------------------------------ cache
 
@@ -128,28 +142,69 @@
 
   // ---------------------------------------------------------------- geocode
 
+  // Windstone Dr sits in the Miller Creek townhomes in Marinwood; only accept
+  // geocode hits inside this tight box AND whose name mentions the street —
+  // otherwise a ZIP/city centroid miles away can sneak through.
+  var MARINWOOD_BOX = { south: 37.99, north: 38.09, west: -122.63, east: -122.47 };
+
+  function usableHit(lat, lon, name) {
+    return isFinite(lat) && isFinite(lon) &&
+      lat > MARINWOOD_BOX.south && lat < MARINWOOD_BOX.north &&
+      lon > MARINWOOD_BOX.west && lon < MARINWOOD_BOX.east &&
+      /windstone/i.test(name || '');
+  }
+
+  function geocodeNominatim() {
+    var url = NOMINATIM_URL + '?format=jsonv2&limit=3&countrycodes=us' +
+      '&street=' + encodeURIComponent('29 Windstone Drive') +
+      '&city=' + encodeURIComponent('San Rafael') +
+      '&state=California&postalcode=94903';
+    return fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, 8000)
+      .then(function (res) { return res.json(); })
+      .then(function (results) {
+        var hit = (results || []).filter(function (r) {
+          return usableHit(parseFloat(r.lat), parseFloat(r.lon), r.display_name);
+        })[0];
+        if (!hit) throw new Error('no usable Nominatim result');
+        return { lat: parseFloat(hit.lat), lon: parseFloat(hit.lon), approximate: false };
+      });
+  }
+
+  function geocodePhoton() {
+    var url = 'https://photon.komoot.io/api/?limit=5&lat=38.03&lon=-122.55&q=' +
+      encodeURIComponent('29 Windstone Drive San Rafael');
+    return fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, 8000)
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        var hit = ((data && data.features) || []).filter(function (f) {
+          var p = f.properties || {};
+          var c = (f.geometry || {}).coordinates || [];
+          return usableHit(c[1], c[0], [p.name, p.street].join(' '));
+        })[0];
+        if (!hit) throw new Error('no usable Photon result');
+        var coords = hit.geometry.coordinates;
+        return { lat: coords[1], lon: coords[0], approximate: false };
+      });
+  }
+
+  var ORIGIN_OVERRIDE_KEY = 'origin-override:v1';
+
   function geocodeOrigin() {
-    var cacheKey = 'geo:' + CACHE_VERSION + ':' + ORIGIN.query;
+    // A hand-corrected pin (dragged marker) always wins.
+    try {
+      var override = JSON.parse(localStorage.getItem(ORIGIN_OVERRIDE_KEY));
+      if (override && isFinite(override.lat)) return Promise.resolve(override);
+    } catch (e) {}
+
+    var cacheKey = 'geo:v2:' + ORIGIN.query;
     var cached = cacheGet(cacheKey);
     if (cached) return Promise.resolve(cached);
 
-    var url = NOMINATIM_URL + '?format=jsonv2&limit=1&countrycodes=us&q=' +
-      encodeURIComponent(ORIGIN.query);
-
-    return fetch(url, { headers: { 'Accept': 'application/json' } })
-      .then(function (res) { return res.json(); })
-      .then(function (results) {
-        var hit = results && results[0];
-        if (hit) {
-          var lat = parseFloat(hit.lat), lon = parseFloat(hit.lon);
-          if (lat > MARIN_BOX.south && lat < MARIN_BOX.north &&
-              lon > MARIN_BOX.west && lon < MARIN_BOX.east) {
-            var loc = { lat: lat, lon: lon, approximate: false };
-            cacheSet(cacheKey, loc);
-            return loc;
-          }
-        }
-        throw new Error('no usable geocode result');
+    return geocodeNominatim()
+      .catch(function () { return geocodePhoton(); })
+      .then(function (loc) {
+        cacheSet(cacheKey, loc);
+        return loc;
       })
       .catch(function () {
         return { lat: ORIGIN.fallback.lat, lon: ORIGIN.fallback.lon, approximate: true };
@@ -192,11 +247,11 @@
     };
 
     return enqueue(function () {
-      return fetch(VALHALLA_URL, {
+      return fetchWithTimeout(VALHALLA_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
-      }).then(function (res) {
+      }, 60000).then(function (res) {
         if (!res.ok) throw new Error('Valhalla HTTP ' + res.status);
         return res.json();
       }).then(function (geojson) {
@@ -264,10 +319,10 @@
       L.geoJSON(feat, {
         style: {
           color: color,
-          weight: 1.5,
+          weight: 1.8,
           opacity: 0.9,
           fillColor: color,
-          fillOpacity: 0.42
+          fillOpacity: 0.3
         }
       }).bindTooltip(label, { sticky: true, className: 'band-tip' })
         .addTo(isoLayerGroup);
@@ -276,8 +331,15 @@
     homeMarker.bringToFront && homeMarker.bringToFront();
 
     if (!state.fitted[modeKey]) {
-      var outermost = result.sorted[result.sorted.length - 1];
-      var bounds = L.geoJSON(outermost).getBounds();
+      // Start focused on the 30-min band (outermost for walking) — fitting
+      // the 90-min drive blob zooms out to the whole Bay Area.
+      var fitBand = modeKey === 'walk'
+        ? mode.bands[mode.bands.length - 1]
+        : mode.bands[1];
+      var fitFeat = result.sorted.filter(function (f) {
+        return f.properties.band === fitBand;
+      })[0] || result.sorted[result.sorted.length - 1];
+      var bounds = L.geoJSON(fitFeat).getBounds();
       if (bounds.isValid()) map.fitBounds(bounds, { padding: [30, 30] });
       state.fitted[modeKey] = true;
     }
@@ -326,7 +388,7 @@
   function renderActiveMode(force) {
     var modeKey = state.mode;
     var token = ++state.renderToken;
-    showStatus('Computing ' + modeKey + ' travel times…');
+    showStatus('Computing ' + modeKey + ' travel times… (first time can take ~20 s)');
 
     fetchIsochrones(modeKey, currentFactor())
       .then(function (geojson) {
@@ -422,7 +484,8 @@
     state.theme = theme;
     document.documentElement.setAttribute('data-theme', theme);
     try { localStorage.setItem('theme', theme); } catch (e) {}
-    if (tileLayer) tileLayer.setUrl(TILES[theme]);
+    if (tileLayer) tileLayer.setUrl(TILES[theme].base);
+    if (labelLayer) labelLayer.setUrl(TILES[theme].labels);
     // Re-tint existing isochrones + legend without refetching.
     if (state.mode && state.origin && isoLayerGroup.getLayers().length) {
       var cached = cacheGet(['iso', CACHE_VERSION, MODES[state.mode].costing,
@@ -464,12 +527,28 @@
       maxBoundsViscosity: 0.7,
       zoomControl: true
     });
-    tileLayer = L.tileLayer(TILES[state.theme], {
+    // Labels render in their own pane above the isochrone fills (overlayPane
+    // is z-index 400) so road and place names stay readable.
+    map.createPane('labels');
+    map.getPane('labels').style.zIndex = 450;
+    map.getPane('labels').style.pointerEvents = 'none';
+    tileLayer = L.tileLayer(TILES[state.theme].base, {
       attribution: TILE_ATTR,
       subdomains: 'abcd',
       maxZoom: 19
     }).addTo(map);
+    labelLayer = L.tileLayer(TILES[state.theme].labels, {
+      subdomains: 'abcd',
+      maxZoom: 19,
+      pane: 'labels'
+    }).addTo(map);
     isoLayerGroup = L.layerGroup().addTo(map);
+  }
+
+  function markerTooltipText() {
+    var o = state.origin;
+    var note = o.custom ? 'custom pin' : (o.approximate ? 'approximate' : 'geocoded');
+    return ORIGIN.label + ' (' + note + ' — drag pin to adjust)';
   }
 
   function placeHomeMarker() {
@@ -480,10 +559,25 @@
       iconSize: [30, 30],
       iconAnchor: [15, 15]
     });
-    homeMarker = L.marker([o.lat, o.lon], { icon: icon, zIndexOffset: 1000 })
-      .addTo(map)
-      .bindTooltip(ORIGIN.label + (o.approximate ? ' (approximate location)' : ''),
-        { className: 'band-tip' });
+    homeMarker = L.marker([o.lat, o.lon], {
+      icon: icon,
+      zIndexOffset: 1000,
+      draggable: true
+    }).addTo(map).bindTooltip(markerTooltipText(), { className: 'band-tip' });
+
+    // If the geocoder put the pin in the wrong spot, dragging it fixes the
+    // origin, recomputes every mode from there, and remembers the correction.
+    homeMarker.on('dragend', function () {
+      var p = homeMarker.getLatLng();
+      state.origin = { lat: p.lat, lon: p.lng, approximate: false, custom: true };
+      try {
+        localStorage.setItem(ORIGIN_OVERRIDE_KEY, JSON.stringify(state.origin));
+      } catch (e) {}
+      homeMarker.setTooltipContent(markerTooltipText());
+      state.fitted = {};
+      prefetched = false;
+      renderActiveMode();
+    });
   }
 
   initTheme();
