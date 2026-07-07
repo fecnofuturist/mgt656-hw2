@@ -24,14 +24,34 @@
     walk:  { costing: 'pedestrian', bands: [15, 30, 45, 60], noun: 'on foot',    legend: 'Travel time on foot' }
   };
 
-  // Typical SF Bay Area weekday congestion multiplier by departure hour.
-  // 1.0 = free-flow. Peaks ~1.75x at the 5 PM crush. An estimate — the free
-  // Valhalla server has no live traffic data.
-  var HOURLY_FACTOR = {
-    4: 1.0, 5: 1.0, 6: 1.2, 7: 1.5, 8: 1.65, 9: 1.5, 10: 1.25, 11: 1.2,
-    12: 1.2, 13: 1.2, 14: 1.25, 15: 1.4, 16: 1.6, 17: 1.75, 18: 1.65,
-    19: 1.35, 20: 1.15, 21: 1.05, 22: 1.0
+  // Typical SF Bay Area weekday congestion by departure hour, split by
+  // direction: h = multiplier in the peak commute direction, l = in the
+  // counter-commute direction. From Marinwood the AM crush is south/east
+  // (101 toward SF, the Richmond Bridge); the PM crush is north (101 homeward
+  // through Marin) and east (bridge outbound). Still an estimate — the free
+  // Valhalla server has no traffic data — but directionally shaped.
+  var TRAFFIC = {
+    4:  { h: 1.0,  l: 1.0 },  5:  { h: 1.0,  l: 1.0 },
+    6:  { h: 1.35, l: 1.1 },  7:  { h: 1.6,  l: 1.15 },
+    8:  { h: 1.7,  l: 1.2 },  9:  { h: 1.55, l: 1.15 },
+    10: { h: 1.3,  l: 1.1 },  11: { h: 1.25, l: 1.15 },
+    12: { h: 1.25, l: 1.15 }, 13: { h: 1.25, l: 1.15 },
+    14: { h: 1.35, l: 1.2 },  15: { h: 1.5,  l: 1.25 },
+    16: { h: 1.65, l: 1.3 },  17: { h: 1.75, l: 1.35 },
+    18: { h: 1.65, l: 1.3 },  19: { h: 1.35, l: 1.15 },
+    20: { h: 1.15, l: 1.05 }, 21: { h: 1.05, l: 1.0 },
+    22: { h: 1.0,  l: 1.0 }
   };
+
+  function factorsFor(hour) { return TRAFFIC[hour] || { h: 1.0, l: 1.0 }; }
+
+  // Heavy-direction compass wedge [fromBearing, toBearing] clockwise, and a
+  // human label for it. Before 2 PM the peak flow is SF-bound; after, homeward.
+  function heavySectorFor(hour) {
+    return hour < 14
+      ? { from: 90, to: 270, label: 'toward SF / East Bay' }
+      : { from: 250, to: 110, label: 'toward Novato / East Bay' };
+  }
 
   function trafficWord(f) {
     if (f >= 1.6) return 'heavy traffic';
@@ -72,7 +92,8 @@
     mode: null,               // 'drive' | 'bike' | 'walk'
     theme: null,              // 'light' | 'dark'
     departHour: 5,            // drive tab departure hour (5 AM = free-flow)
-    origin: null,             // {lat, lon, approximate}
+    origin: null,             // {lat, lon, approximate, custom}
+    currentGeo: null,         // last rendered isochrone FeatureCollection
     fitted: {},               // mode -> bool, so we only auto-zoom once per mode
     renderToken: 0            // guards against out-of-order async renders
   };
@@ -313,8 +334,9 @@
       if (i < 0) i = mode.bands.length - 1;
       var color = palette[i];
       var label = bandLabel(mode.bands, i) + ' ' + mode.noun;
-      if (modeKey === 'drive' && currentFactor() > 1.01) {
-        label += ' (' + trafficWord(currentFactor()) + ')';
+      var tf = currentTraffic();
+      if (modeKey === 'drive' && tf.h > 1.01) {
+        label += ' (rush-hour estimate)';
       }
       L.geoJSON(feat, {
         style: {
@@ -369,10 +391,11 @@
 
     var note = document.getElementById('legend-note');
     if (modeKey === 'drive') {
-      var f = currentFactor();
-      note.textContent = f > 1.01
-        ? 'Departing ' + hourLabel(state.departHour) + ' · ' + trafficWord(f) +
-          ' (≈' + f + '× free-flow, estimated)'
+      var f = currentTraffic();
+      note.textContent = f.h > 1.01
+        ? 'Departing ' + hourLabel(state.departHour) + ' · ≈' + f.h + '× ' +
+          heavySectorFor(state.departHour).label + ', ≈' + f.l +
+          '× other directions (estimated)'
         : 'Free-flow (no congestion)';
     } else {
       note.textContent = '';
@@ -381,8 +404,49 @@
 
   // -------------------------------------------------------------- mode logic
 
-  function currentFactor() {
-    return state.mode === 'drive' ? (HOURLY_FACTOR[state.departHour] || 1.0) : 1.0;
+  function currentTraffic() {
+    return state.mode === 'drive' ? factorsFor(state.departHour) : { h: 1.0, l: 1.0 };
+  }
+
+  // A wedge polygon from the origin covering bearings [from → to] clockwise,
+  // big enough (300 km) to cover any isochrone.
+  function sectorPolygon(o, fromB, toB) {
+    var center = turf.point([o.lon, o.lat]);
+    var end = toB <= fromB ? toB + 360 : toB;
+    var coords = [[o.lon, o.lat]];
+    for (var b = fromB; b < end; b += 6) {
+      coords.push(turf.destination(center, 300, b).geometry.coordinates);
+    }
+    coords.push(turf.destination(center, 300, end).geometry.coordinates);
+    coords.push([o.lon, o.lat]);
+    return turf.polygon([coords]);
+  }
+
+  // Stitch a directional rush-hour isochrone: the heavy-factor polygon in the
+  // peak-flow wedge, the light-factor polygon everywhere else.
+  function combineDirectional(heavyGeo, lightGeo, hour) {
+    if (!window.turf) return heavyGeo;
+    try {
+      var sector = heavySectorFor(hour);
+      var wedge = sectorPolygon(state.origin, sector.from, sector.to);
+      var features = heavyGeo.features.map(function (hFeat) {
+        var band = hFeat.properties.band;
+        var lFeat = lightGeo.features.filter(function (f) {
+          return f.properties.band === band;
+        })[0];
+        if (!lFeat) return hFeat;
+        var heavyPart = turf.intersect(hFeat, wedge);
+        var lightPart = turf.difference(lFeat, wedge);
+        var merged = heavyPart && lightPart ? turf.union(heavyPart, lightPart)
+                                            : (heavyPart || lightPart || hFeat);
+        merged.properties = { band: band };
+        return merged;
+      });
+      return { type: 'FeatureCollection', features: features };
+    } catch (e) {
+      // Geometry hiccup — fall back to the conservative uniform-heavy shape.
+      return heavyGeo;
+    }
   }
 
   function renderActiveMode(force) {
@@ -390,9 +454,18 @@
     var token = ++state.renderToken;
     showStatus('Computing ' + modeKey + ' travel times… (first time can take ~20 s)');
 
-    fetchIsochrones(modeKey, currentFactor())
+    var tf = modeKey === 'drive' ? factorsFor(state.departHour) : { h: 1.0, l: 1.0 };
+    var pending = tf.h > 1.01
+      ? Promise.all([fetchIsochrones(modeKey, tf.h), fetchIsochrones(modeKey, tf.l)])
+          .then(function (both) {
+            return combineDirectional(both[0], both[1], state.departHour);
+          })
+      : fetchIsochrones(modeKey, 1.0);
+
+    pending
       .then(function (geojson) {
         if (token !== state.renderToken) return; // a newer render superseded us
+        state.currentGeo = geojson;
         renderIsochrones(modeKey, geojson);
         hideStatus();
         prefetchOtherModes();
@@ -452,9 +525,9 @@
   var sliderTimer = null;
 
   function updateTrafficUI() {
-    var f = HOURLY_FACTOR[state.departHour] || 1.0;
-    readout.textContent = hourLabel(state.departHour) + ' · ' + trafficWord(f) +
-      (f > 1.01 ? ' (≈' + f + '×)' : '');
+    var f = factorsFor(state.departHour);
+    readout.textContent = hourLabel(state.departHour) + ' · ' + trafficWord(f.h) +
+      (f.h > 1.01 ? ' ' + heavySectorFor(state.departHour).label : '');
     document.querySelectorAll('.preset').forEach(function (btn) {
       btn.classList.toggle('active', Number(btn.dataset.hour) === state.departHour);
     });
@@ -487,12 +560,10 @@
     if (tileLayer) tileLayer.setUrl(TILES[theme].base);
     if (labelLayer) labelLayer.setUrl(TILES[theme].labels);
     // Re-tint existing isochrones + legend without refetching.
-    if (state.mode && state.origin && isoLayerGroup.getLayers().length) {
-      var cached = cacheGet(['iso', CACHE_VERSION, MODES[state.mode].costing,
-        Math.round(currentFactor() * 100) / 100,
-        state.origin.lat.toFixed(5), state.origin.lon.toFixed(5)].join(':'));
-      if (cached) renderIsochrones(state.mode, cached);
-      else renderLegend(state.mode);
+    if (state.mode && state.currentGeo) {
+      renderIsochrones(state.mode, state.currentGeo);
+    } else if (state.mode && state.origin) {
+      renderLegend(state.mode);
     }
   }
 

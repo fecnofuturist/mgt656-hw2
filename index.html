@@ -42,8 +42,8 @@
            aria-label="Departure hour of day">
     <span id="traffic-readout" class="traffic-readout">5 AM · light traffic</span>
   </div>
-  <p class="traffic-note">Typical weekday congestion model — free routing data has no live traffic, so
-  rush-hour bands are estimated by scaling free-flow drive times.</p>
+  <p class="traffic-note">Directional weekday congestion model — times are scaled harder in the peak
+  commute direction (SF-bound mornings, northbound evenings) than against it. Estimated, not live traffic.</p>
 </div>
 
 <main id="map" aria-label="Travel time map"></main>
@@ -69,9 +69,10 @@
     <li><strong>Isochrones:</strong> <a href="https://valhalla.openstreetmap.de" target="_blank" rel="noopener">Valhalla</a> routing engine on OpenStreetMap data (FOSSGIS server).</li>
     <li><strong>Geocoding:</strong> Nominatim (OpenStreetMap).</li>
     <li><strong>Basemap:</strong> CARTO &middot; &copy; OpenStreetMap contributors.</li>
-    <li><strong>Rush hour:</strong> the driving tab scales free-flow times by a typical Bay Area
-        weekday congestion factor for the chosen departure hour (up to ~1.75&times; at 5&nbsp;PM).
-        It is an estimate, not live traffic.</li>
+    <li><strong>Rush hour:</strong> the driving tab uses a <em>directional</em> congestion model:
+        travel times are scaled harder in the peak commute direction (toward SF/East Bay in the
+        morning, toward Novato/East Bay in the evening, up to ~1.75&times; at 5&nbsp;PM) than in the
+        counter-commute direction. Typical-weekday estimate, not live traffic.</li>
   </ul>
   <p><strong>Pin in the wrong spot?</strong> Drag the 🏠 marker to the right location —
      all travel times recompute from there and your correction is remembered.</p>
