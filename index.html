@@ -73,7 +73,8 @@
      the real road, bike and footpath network. Switch addresses with the tabs in the header.</p>
   <ul>
     <li><strong>Isochrones:</strong> <a href="https://valhalla.openstreetmap.de" target="_blank" rel="noopener">Valhalla</a> routing engine on OpenStreetMap data (FOSSGIS server).</li>
-    <li><strong>Geocoding:</strong> Nominatim (OpenStreetMap).</li>
+    <li><strong>Geocoding:</strong> Nominatim (OpenStreetMap), then the US Census Bureau
+        geocoder, then Photon — first house-level match inside each address's sanity box wins.</li>
     <li><strong>Basemap:</strong> CARTO &middot; &copy; OpenStreetMap contributors.</li>
     <li><strong>Rush hour:</strong> the driving tab uses a <em>directional</em> congestion model:
         travel times are scaled harder in the peak commute direction (toward SF/East Bay in the
