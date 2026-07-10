@@ -67,9 +67,9 @@
   var NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
 
   var MODES = {
-    drive: { costing: 'auto',       bands: [15, 30, 60, 90], noun: 'by car',  legend: 'Travel time by car' },
-    bike:  { costing: 'bicycle',    bands: [15, 30, 60, 90], noun: 'by bike', legend: 'Travel time by bike' },
-    walk:  { costing: 'pedestrian', bands: [15, 30, 45, 60], noun: 'on foot', legend: 'Travel time on foot' }
+    drive: { costing: 'auto',       bands: [5, 15, 30, 60, 90], noun: 'by car',  legend: 'Travel time by car' },
+    bike:  { costing: 'bicycle',    bands: [5, 15, 30, 60, 90], noun: 'by bike', legend: 'Travel time by bike' },
+    walk:  { costing: 'pedestrian', bands: [5, 15, 30, 45, 60], noun: 'on foot', legend: 'Travel time on foot' }
   };
 
   // Typical SF Bay Area weekday congestion by departure hour, split by
@@ -106,8 +106,8 @@
 
   // Ordinal blue ramps (validated): index 0 = shortest band = most salient.
   var PALETTES = {
-    light: ['#0d366b', '#1c5cab', '#3987e5', '#86b6ef'],
-    dark:  ['#9ec5f4', '#5598e7', '#2a78d6', '#184f95']
+    light: ['#0d366b', '#1c5cab', '#2a78d6', '#5598e7', '#86b6ef'],
+    dark:  ['#9ec5f4', '#6da7ec', '#3987e5', '#256abf', '#184f95']
   };
 
   // Voyager basemap: parks/green space, water, colored roads. Labels come
@@ -127,7 +127,7 @@
     ' &copy; <a href="https://carto.com/attributions">CARTO</a>' +
     ' &middot; isochrones <a href="https://valhalla.openstreetmap.de">Valhalla/FOSSGIS</a>';
 
-  var CACHE_VERSION = 'v1';
+  var CACHE_VERSION = 'v2'; // v2: five bands per mode
   var CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // one week
 
   // ------------------------------------------------------------------ state
@@ -251,7 +251,44 @@
       });
   }
 
+  // US Census Bureau geocoder: house-level accuracy from official TIGER data.
+  // No CORS headers, but it supports JSONP — load it as a script tag.
+  var censusCbCount = 0;
+  function geocodeCensus(def) {
+    return new Promise(function (resolve, reject) {
+      var cb = '__censusCb' + (++censusCbCount);
+      var script = document.createElement('script');
+      var timer = setTimeout(function () { cleanup(); reject(new Error('census timeout')); }, 8000);
+      function cleanup() {
+        clearTimeout(timer);
+        try { delete window[cb]; } catch (e) { window[cb] = undefined; }
+        if (script.parentNode) script.parentNode.removeChild(script);
+      }
+      window[cb] = function (data) {
+        cleanup();
+        try {
+          var m = data.result.addressMatches[0];
+          var lat = m.coordinates.y, lon = m.coordinates.x;
+          if (usableHit(def, lat, lon, m.matchedAddress)) {
+            resolve({ lat: lat, lon: lon, approximate: false });
+          } else {
+            reject(new Error('census hit failed validation'));
+          }
+        } catch (e) { reject(e); }
+      };
+      script.onerror = function () { cleanup(); reject(new Error('census script error')); };
+      script.src = 'https://geocoding.geo.census.gov/geocoder/locations/onelineaddress' +
+        '?benchmark=Public_AR_Current&format=jsonp&callback=' + cb +
+        '&address=' + encodeURIComponent(def.street + ', ' + def.city + ', CA ' + def.postalcode);
+      document.head.appendChild(script);
+    });
+  }
+
   function overrideKey(def) { return 'origin-override:v2:' + def.key; }
+
+  function tagSource(source) {
+    return function (loc) { loc.source = source; return loc; };
+  }
 
   function geocodeOrigin(def) {
     // A hand-corrected pin (dragged marker) always wins. (v1 was the single
@@ -263,12 +300,13 @@
       if (override && isFinite(override.lat)) return Promise.resolve(override);
     } catch (e) {}
 
-    var cacheKey = 'geo:v3:' + def.key;
+    var cacheKey = 'geo:v4:' + def.key;
     var cached = cacheGet(cacheKey);
     if (cached) return Promise.resolve(cached);
 
-    return geocodeNominatim(def)
-      .catch(function () { return geocodePhoton(def); })
+    return geocodeNominatim(def).then(tagSource('OpenStreetMap'))
+      .catch(function () { return geocodeCensus(def).then(tagSource('US Census')); })
+      .catch(function () { return geocodePhoton(def).then(tagSource('Photon')); })
       .then(function (loc) {
         cacheSet(cacheKey, loc);
         return loc;
@@ -293,21 +331,13 @@
     });
   }
 
-  function fetchIsochrones(modeKey, factor) {
-    var mode = MODES[modeKey];
-    var o = state.origin;
-    var f = Math.round(factor * 100) / 100;
-    var cacheKey = ['iso', CACHE_VERSION, mode.costing, f,
-      o.lat.toFixed(5), o.lon.toFixed(5)].join(':');
-
-    var cached = cacheGet(cacheKey);
-    if (cached) return Promise.resolve(cached);
-
-    var times = contourTimes(mode.bands, f);
+  // One Valhalla request for up to 4 contours (the server's per-request cap).
+  // chunk = [{band, time}]; resolves to features tagged with their nominal band.
+  function fetchIsochroneChunk(mode, o, chunk) {
     var body = {
       locations: [{ lat: o.lat, lon: o.lon }],
       costing: mode.costing,
-      contours: times.map(function (t) { return { time: t }; }),
+      contours: chunk.map(function (c) { return { time: c.time }; }),
       polygons: true,
       denoise: 0.3,
       generalize: 100
@@ -325,14 +355,41 @@
         if (!geojson.features || !geojson.features.length) {
           throw new Error(geojson.error || 'empty isochrone response');
         }
-        // Tag each feature with the *nominal* band minutes it represents.
         geojson.features.forEach(function (feat) {
-          var idx = times.indexOf(Math.round(feat.properties.contour));
-          feat.properties.band = idx >= 0 ? mode.bands[idx] : feat.properties.contour;
+          var m = chunk.filter(function (c) {
+            return c.time === Math.round(feat.properties.contour);
+          })[0];
+          feat.properties.band = m ? m.band : feat.properties.contour;
         });
-        cacheSet(cacheKey, geojson);
-        return geojson;
+        return geojson.features;
       });
+    });
+  }
+
+  function fetchIsochrones(modeKey, factor) {
+    var mode = MODES[modeKey];
+    var o = state.origin;
+    var f = Math.round(factor * 100) / 100;
+    var cacheKey = ['iso', CACHE_VERSION, mode.costing, f,
+      o.lat.toFixed(5), o.lon.toFixed(5)].join(':');
+
+    var cached = cacheGet(cacheKey);
+    if (cached) return Promise.resolve(cached);
+
+    var times = contourTimes(mode.bands, f);
+    var pairs = mode.bands.map(function (b, i) { return { band: b, time: times[i] }; });
+    var chunks = [];
+    for (var i = 0; i < pairs.length; i += 4) chunks.push(pairs.slice(i, i + 4));
+
+    return Promise.all(chunks.map(function (chunk) {
+      return fetchIsochroneChunk(mode, o, chunk);
+    })).then(function (featureLists) {
+      var geojson = {
+        type: 'FeatureCollection',
+        features: [].concat.apply([], featureLists)
+      };
+      cacheSet(cacheKey, geojson);
+      return geojson;
     });
   }
 
@@ -404,7 +461,7 @@
       // the 90-min drive blob zooms out to the whole Bay Area.
       var fitBand = modeKey === 'walk'
         ? mode.bands[mode.bands.length - 1]
-        : mode.bands[1];
+        : 30;
       var fitFeat = result.sorted.filter(function (f) {
         return f.properties.band === fitBand;
       })[0] || result.sorted[result.sorted.length - 1];
@@ -603,6 +660,10 @@
       }
       if (!state.fitted[originKey + ':' + state.mode]) {
         map.setView([loc.lat, loc.lon], 10);
+      } else {
+        // Already auto-fitted once — keep the zoom but bring the new origin
+        // into view instead of leaving the map parked at the old one.
+        map.panTo([loc.lat, loc.lon]);
       }
       renderActiveMode();
     });
@@ -715,7 +776,9 @@
 
   function markerTooltipText() {
     var o = state.origin;
-    var note = o.custom ? 'custom pin' : (o.approximate ? 'approximate' : 'geocoded');
+    var note = o.custom ? 'custom pin'
+      : o.approximate ? 'approximate'
+      : 'geocoded' + (o.source ? ' via ' + o.source : '');
     return activeOrigin().label + ' (' + note + ' — drag pin to adjust)';
   }
 
