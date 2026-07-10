@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bay Area travel-time map</title>
+<meta name="description" content="How far can you get by car, bike, or on foot from home — Bay Area travel-time map with switchable starting addresses.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗺️</text></svg>">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="title-block">
+    <h1>How far can you get from <span class="origin-name">29 Windstone Dr, Marinwood</span>?</h1>
+    <p class="subtitle">Travel-time map of the Bay Area &middot; each shaded band shows everywhere reachable within that time</p>
+  </div>
+  <nav class="tabs origin-tabs" role="tablist" aria-label="Starting address">
+    <button class="origin-tab" role="tab" data-origin="marinwood" aria-selected="true">Marinwood</button>
+    <button class="origin-tab" role="tab" data-origin="piedmont" aria-selected="false">Piedmont</button>
+    <button class="origin-tab" role="tab" data-origin="berkeley" aria-selected="false">Berkeley</button>
+  </nav>
+  <nav class="tabs" role="tablist" aria-label="Travel mode">
+    <button class="tab" role="tab" data-mode="drive" aria-selected="false">🚗 Drive</button>
+    <button class="tab" role="tab" data-mode="bike"  aria-selected="false">🚴 Bike</button>
+    <button class="tab" role="tab" data-mode="walk"  aria-selected="false">🚶 Walk</button>
+  </nav>
+  <div class="header-actions">
+    <button id="theme-toggle" class="icon-btn" title="Toggle light/dark map" aria-label="Toggle light/dark map">◐</button>
+    <button id="about-btn" class="icon-btn" title="About this map" aria-label="About this map">ⓘ</button>
+  </div>
+</header>
+
+<div id="traffic-panel" class="traffic-panel" hidden>
+  <div class="traffic-row">
+    <span class="traffic-title">Departure time</span>
+    <div class="presets">
+      <button class="preset" data-hour="5">Off-peak</button>
+      <button class="preset" data-hour="8">AM rush</button>
+      <button class="preset" data-hour="17">PM rush</button>
+    </div>
+  </div>
+  <div class="traffic-row">
+    <input type="range" id="depart-slider" min="4" max="22" step="1" value="5"
+           aria-label="Departure hour of day">
+    <span id="traffic-readout" class="traffic-readout">5 AM · light traffic</span>
+  </div>
+  <p class="traffic-note">Directional weekday congestion model — times are scaled harder in the peak
+  commute direction (SF-bound mornings, northbound evenings) than against it. Estimated, not live traffic.</p>
+</div>
+
+<main id="map" aria-label="Travel time map"></main>
+
+<aside class="legend" id="legend" aria-label="Travel time legend">
+  <div class="legend-title" id="legend-title">Travel time by car</div>
+  <div id="legend-rows"></div>
+  <div class="legend-note" id="legend-note"></div>
+</aside>
+
+<div class="status" id="status" hidden>
+  <span class="spinner" aria-hidden="true"></span>
+  <span id="status-text">Loading…</span>
+  <button id="retry-btn" class="retry" hidden>Retry</button>
+</div>
+
+<dialog id="about" class="about">
+  <h2>About this map</h2>
+  <p>Each shaded band shows the area reachable from the selected home address —
+     <strong>29 Windstone Dr, Marinwood</strong>, <strong>911 Moraga Ave, Piedmont</strong>, or
+     <strong>1601 Lincoln St, Berkeley</strong> — within the labeled travel time, computed on
+     the real road, bike and footpath network. Switch addresses with the tabs in the header.</p>
+  <ul>
+    <li><strong>Isochrones:</strong> <a href="https://valhalla.openstreetmap.de" target="_blank" rel="noopener">Valhalla</a> routing engine on OpenStreetMap data (FOSSGIS server).</li>
+    <li><strong>Geocoding:</strong> Nominatim (OpenStreetMap), then the US Census Bureau
+        geocoder, then Photon — first house-level match inside each address's sanity box wins.</li>
+    <li><strong>Basemap:</strong> CARTO &middot; &copy; OpenStreetMap contributors.</li>
+    <li><strong>Rush hour:</strong> the driving tab uses a <em>directional</em> congestion model:
+        travel times are scaled harder in the peak commute direction (toward SF/East Bay in the
+        morning, toward Novato/East Bay in the evening, up to ~1.75&times; at 5&nbsp;PM) than in the
+        counter-commute direction. Typical-weekday estimate, not live traffic.</li>
+  </ul>
+  <p><strong>Pin in the wrong spot?</strong> Drag the 🏠 marker to the right location —
+     all travel times recompute from there and your correction is remembered.</p>
+  <p>Results are cached in your browser for a week to be gentle on the free servers.</p>
+  <form method="dialog"><button class="close-btn">Close</button></form>
+</dialog>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+name: Deploy map to GitHub Pages
+
+on:
+  push:
+    branches:
+      - master
+      - claude/bay-area-transit-map-tpazmk
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add SPA fallback and disable Jekyll
+        run: |
+          cp public/index.html public/404.html
+          touch public/.nojekyll
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: gh-pages
