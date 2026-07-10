@@ -62,6 +62,29 @@ body {
 }
 
 .tabs { display: flex; gap: 4px; }
+.origin-tabs {
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+}
+.origin-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.origin-tab:hover { color: var(--text-primary); }
+.origin-tab[aria-selected="true"] {
+  background: var(--accent);
+  color: #fff;
+}
 .tab {
   appearance: none;
   border: 1px solid transparent;
@@ -302,5 +325,7 @@ body {
   .app-header h1 { font-size: 14px; }
   .tabs { order: 3; width: 100%; }
   .tab { flex: 1; text-align: center; }
+  .origin-tabs { order: 4; }
+  .origin-tab { flex: 1; text-align: center; }
   .legend { bottom: 64px; }
 }

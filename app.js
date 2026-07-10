@@ -1,6 +1,6 @@
-/* Travel-time (isochrone) map from 29 Windstone Dr, Marinwood.
+/* Travel-time (isochrone) map for a set of Bay Area home addresses.
  * Isochrones: Valhalla (FOSSGIS/OpenStreetMap) — free, no API key.
- * Geocoding: Nominatim. Basemap: CARTO / OpenStreetMap.
+ * Geocoding: Nominatim (Photon fallback). Basemap: CARTO / OpenStreetMap.
  * Everything is fetched client-side and cached in localStorage.
  */
 (function () {
@@ -8,28 +8,74 @@
 
   // ------------------------------------------------------------------ config
 
-  var ORIGIN = {
-    label: '29 Windstone Dr, Marinwood',
-    query: '29 Windstone Drive, San Rafael, California 94903',
-    // Marinwood fallback used until Nominatim answers (or if it can't).
-    fallback: { lat: 38.0316, lon: -122.5477 }
+  // Each origin carries its own geocode validation (tight bounding box + a
+  // street-name pattern so a ZIP/city centroid can't sneak through) and its
+  // own commute geometry for the directional rush-hour model.
+  var ORIGINS = {
+    marinwood: {
+      key: 'marinwood',
+      label: '29 Windstone Dr, Marinwood',
+      short: 'Marinwood',
+      street: '29 Windstone Drive', city: 'San Rafael', postalcode: '94903',
+      freeQuery: '29 Windstone Drive San Rafael',
+      match: /windstone/i,
+      box: { south: 37.99, north: 38.09, west: -122.63, east: -122.47 },
+      fallback: { lat: 38.0316, lon: -122.5477 },
+      // AM crush: 101 south toward SF + Richmond Bridge. PM: homeward north
+      // through Marin + bridge outbound.
+      sectors: {
+        am: { from: 90, to: 270, label: 'toward SF / East Bay' },
+        pm: { from: 250, to: 110, label: 'toward Novato / East Bay' }
+      }
+    },
+    piedmont: {
+      key: 'piedmont',
+      label: '911 Moraga Ave, Piedmont',
+      short: 'Piedmont',
+      street: '911 Moraga Avenue', city: 'Piedmont', postalcode: '94611',
+      freeQuery: '911 Moraga Avenue Piedmont California',
+      match: /moraga/i,
+      box: { south: 37.79, north: 37.86, west: -122.29, east: -122.19 },
+      fallback: { lat: 37.8255, lon: -122.2354 },
+      // AM crush: Bay Bridge toward SF + 880 toward the South Bay. PM: the
+      // outbound flood — 24 east through the tunnel and 80/580 north.
+      sectors: {
+        am: { from: 170, to: 300, label: 'toward SF / South Bay' },
+        pm: { from: 300, to: 120, label: 'toward Walnut Creek / north & east' }
+      }
+    },
+    berkeley: {
+      key: 'berkeley',
+      label: '1601 Lincoln St, Berkeley',
+      short: 'Berkeley',
+      street: '1601 Lincoln Street', city: 'Berkeley', postalcode: '94703',
+      freeQuery: '1601 Lincoln Street Berkeley California',
+      match: /lincoln/i,
+      box: { south: 37.84, north: 37.91, west: -122.32, east: -122.22 },
+      fallback: { lat: 37.8775, lon: -122.2760 },
+      // AM crush: 80 south + Bay Bridge toward SF and 880 toward Oakland.
+      // PM: outbound — 80 north toward Richmond and east through the hills.
+      sectors: {
+        am: { from: 160, to: 290, label: 'toward SF / Oakland' },
+        pm: { from: 290, to: 120, label: 'toward Richmond / north & east' }
+      }
+    }
   };
+  var DEFAULT_ORIGIN = 'marinwood';
 
   var VALHALLA_URL = 'https://valhalla1.openstreetmap.de/isochrone';
   var NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
 
   var MODES = {
-    drive: { costing: 'auto',       bands: [15, 30, 60, 90], noun: 'by car',     legend: 'Travel time by car' },
-    bike:  { costing: 'bicycle',    bands: [15, 30, 60, 90], noun: 'by bike',    legend: 'Travel time by bike' },
-    walk:  { costing: 'pedestrian', bands: [15, 30, 45, 60], noun: 'on foot',    legend: 'Travel time on foot' }
+    drive: { costing: 'auto',       bands: [15, 30, 60, 90], noun: 'by car',  legend: 'Travel time by car' },
+    bike:  { costing: 'bicycle',    bands: [15, 30, 60, 90], noun: 'by bike', legend: 'Travel time by bike' },
+    walk:  { costing: 'pedestrian', bands: [15, 30, 45, 60], noun: 'on foot', legend: 'Travel time on foot' }
   };
 
   // Typical SF Bay Area weekday congestion by departure hour, split by
   // direction: h = multiplier in the peak commute direction, l = in the
-  // counter-commute direction. From Marinwood the AM crush is south/east
-  // (101 toward SF, the Richmond Bridge); the PM crush is north (101 homeward
-  // through Marin) and east (bridge outbound). Still an estimate — the free
-  // Valhalla server has no traffic data — but directionally shaped.
+  // counter-commute direction. An estimate — the free Valhalla server has no
+  // traffic data — but directionally shaped per origin (see ORIGINS.sectors).
   var TRAFFIC = {
     4:  { h: 1.0,  l: 1.0 },  5:  { h: 1.0,  l: 1.0 },
     6:  { h: 1.35, l: 1.1 },  7:  { h: 1.6,  l: 1.15 },
@@ -45,12 +91,10 @@
 
   function factorsFor(hour) { return TRAFFIC[hour] || { h: 1.0, l: 1.0 }; }
 
-  // Heavy-direction compass wedge [fromBearing, toBearing] clockwise, and a
-  // human label for it. Before 2 PM the peak flow is SF-bound; after, homeward.
-  function heavySectorFor(hour) {
-    return hour < 14
-      ? { from: 90, to: 270, label: 'toward SF / East Bay' }
-      : { from: 250, to: 110, label: 'toward Novato / East Bay' };
+  // Peak-flow compass wedge for an origin at a given departure hour.
+  // Before 2 PM the crush is job-center-bound; after, homeward/outbound.
+  function sectorFor(def, hour) {
+    return hour < 14 ? def.sectors.am : def.sectors.pm;
   }
 
   function trafficWord(f) {
@@ -90,13 +134,16 @@
 
   var state = {
     mode: null,               // 'drive' | 'bike' | 'walk'
+    originKey: null,          // key into ORIGINS
     theme: null,              // 'light' | 'dark'
     departHour: 5,            // drive tab departure hour (5 AM = free-flow)
-    origin: null,             // {lat, lon, approximate, custom}
+    origin: null,             // resolved {lat, lon, approximate, custom}
     currentGeo: null,         // last rendered isochrone FeatureCollection
-    fitted: {},               // mode -> bool, so we only auto-zoom once per mode
+    fitted: {},               // originKey:mode -> bool (auto-zoom once each)
     renderToken: 0            // guards against out-of-order async renders
   };
+
+  function activeOrigin() { return ORIGINS[state.originKey] || ORIGINS[DEFAULT_ORIGIN]; }
 
   var map, tileLayer, labelLayer, isoLayerGroup, homeMarker;
 
@@ -158,49 +205,45 @@
 
   retryBtn.addEventListener('click', function () {
     hideStatus();
-    renderActiveMode(true);
+    renderActiveMode();
   });
 
   // ---------------------------------------------------------------- geocode
 
-  // Windstone Dr sits in the Miller Creek townhomes in Marinwood; only accept
-  // geocode hits inside this tight box AND whose name mentions the street —
-  // otherwise a ZIP/city centroid miles away can sneak through.
-  var MARINWOOD_BOX = { south: 37.99, north: 38.09, west: -122.63, east: -122.47 };
-
-  function usableHit(lat, lon, name) {
+  function usableHit(def, lat, lon, name) {
     return isFinite(lat) && isFinite(lon) &&
-      lat > MARINWOOD_BOX.south && lat < MARINWOOD_BOX.north &&
-      lon > MARINWOOD_BOX.west && lon < MARINWOOD_BOX.east &&
-      /windstone/i.test(name || '');
+      lat > def.box.south && lat < def.box.north &&
+      lon > def.box.west && lon < def.box.east &&
+      def.match.test(name || '');
   }
 
-  function geocodeNominatim() {
+  function geocodeNominatim(def) {
     var url = NOMINATIM_URL + '?format=jsonv2&limit=3&countrycodes=us' +
-      '&street=' + encodeURIComponent('29 Windstone Drive') +
-      '&city=' + encodeURIComponent('San Rafael') +
-      '&state=California&postalcode=94903';
+      '&street=' + encodeURIComponent(def.street) +
+      '&city=' + encodeURIComponent(def.city) +
+      '&state=California&postalcode=' + def.postalcode;
     return fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, 8000)
       .then(function (res) { return res.json(); })
       .then(function (results) {
         var hit = (results || []).filter(function (r) {
-          return usableHit(parseFloat(r.lat), parseFloat(r.lon), r.display_name);
+          return usableHit(def, parseFloat(r.lat), parseFloat(r.lon), r.display_name);
         })[0];
         if (!hit) throw new Error('no usable Nominatim result');
         return { lat: parseFloat(hit.lat), lon: parseFloat(hit.lon), approximate: false };
       });
   }
 
-  function geocodePhoton() {
-    var url = 'https://photon.komoot.io/api/?limit=5&lat=38.03&lon=-122.55&q=' +
-      encodeURIComponent('29 Windstone Drive San Rafael');
+  function geocodePhoton(def) {
+    var url = 'https://photon.komoot.io/api/?limit=5' +
+      '&lat=' + def.fallback.lat + '&lon=' + def.fallback.lon +
+      '&q=' + encodeURIComponent(def.freeQuery);
     return fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } }, 8000)
       .then(function (res) { return res.json(); })
       .then(function (data) {
         var hit = ((data && data.features) || []).filter(function (f) {
           var p = f.properties || {};
           var c = (f.geometry || {}).coordinates || [];
-          return usableHit(c[1], c[0], [p.name, p.street].join(' '));
+          return usableHit(def, c[1], c[0], [p.name, p.street].join(' '));
         })[0];
         if (!hit) throw new Error('no usable Photon result');
         var coords = hit.geometry.coordinates;
@@ -208,27 +251,30 @@
       });
   }
 
-  var ORIGIN_OVERRIDE_KEY = 'origin-override:v1';
+  function overrideKey(def) { return 'origin-override:v2:' + def.key; }
 
-  function geocodeOrigin() {
-    // A hand-corrected pin (dragged marker) always wins.
+  function geocodeOrigin(def) {
+    // A hand-corrected pin (dragged marker) always wins. (v1 was the single
+    // Marinwood-only key from before multiple origins existed.)
     try {
-      var override = JSON.parse(localStorage.getItem(ORIGIN_OVERRIDE_KEY));
+      var raw = localStorage.getItem(overrideKey(def)) ||
+        (def.key === 'marinwood' ? localStorage.getItem('origin-override:v1') : null);
+      var override = JSON.parse(raw);
       if (override && isFinite(override.lat)) return Promise.resolve(override);
     } catch (e) {}
 
-    var cacheKey = 'geo:v2:' + ORIGIN.query;
+    var cacheKey = 'geo:v3:' + def.key;
     var cached = cacheGet(cacheKey);
     if (cached) return Promise.resolve(cached);
 
-    return geocodeNominatim()
-      .catch(function () { return geocodePhoton(); })
+    return geocodeNominatim(def)
+      .catch(function () { return geocodePhoton(def); })
       .then(function (loc) {
         cacheSet(cacheKey, loc);
         return loc;
       })
       .catch(function () {
-        return { lat: ORIGIN.fallback.lat, lon: ORIGIN.fallback.lon, approximate: true };
+        return { lat: def.fallback.lat, lon: def.fallback.lon, approximate: true };
       });
   }
 
@@ -352,7 +398,8 @@
 
     homeMarker.bringToFront && homeMarker.bringToFront();
 
-    if (!state.fitted[modeKey]) {
+    var fitKey = state.originKey + ':' + modeKey;
+    if (!state.fitted[fitKey]) {
       // Start focused on the 30-min band (outermost for walking) — fitting
       // the 90-min drive blob zooms out to the whole Bay Area.
       var fitBand = modeKey === 'walk'
@@ -363,7 +410,7 @@
       })[0] || result.sorted[result.sorted.length - 1];
       var bounds = L.geoJSON(fitFeat).getBounds();
       if (bounds.isValid()) map.fitBounds(bounds, { padding: [30, 30] });
-      state.fitted[modeKey] = true;
+      state.fitted[fitKey] = true;
     }
 
     renderLegend(modeKey);
@@ -394,7 +441,7 @@
       var f = currentTraffic();
       note.textContent = f.h > 1.01
         ? 'Departing ' + hourLabel(state.departHour) + ' · ≈' + f.h + '× ' +
-          heavySectorFor(state.departHour).label + ', ≈' + f.l +
+          sectorFor(activeOrigin(), state.departHour).label + ', ≈' + f.l +
           '× other directions (estimated)'
         : 'Free-flow (no congestion)';
     } else {
@@ -427,7 +474,7 @@
   function combineDirectional(heavyGeo, lightGeo, hour) {
     if (!window.turf) return heavyGeo;
     try {
-      var sector = heavySectorFor(hour);
+      var sector = sectorFor(activeOrigin(), hour);
       var wedge = sectorPolygon(state.origin, sector.from, sector.to);
       var features = heavyGeo.features.map(function (hFeat) {
         var band = hFeat.properties.band;
@@ -449,7 +496,7 @@
     }
   }
 
-  function renderActiveMode(force) {
+  function renderActiveMode() {
     var modeKey = state.mode;
     var token = ++state.renderToken;
     showStatus('Computing ' + modeKey + ' travel times… (first time can take ~20 s)');
@@ -477,13 +524,41 @@
       });
   }
 
-  var prefetched = false;
+  var prefetchedOrigins = {};
   function prefetchOtherModes() {
-    if (prefetched) return;
-    prefetched = true;
+    if (prefetchedOrigins[state.originKey]) return;
+    prefetchedOrigins[state.originKey] = true;
     Object.keys(MODES).forEach(function (m) {
       if (m !== state.mode) fetchIsochrones(m, 1.0).catch(function () {});
     });
+  }
+
+  // ------------------------------------------------------------- navigation
+
+  function updateHash() {
+    if (!state.originKey || !state.mode) return;
+    history.replaceState(null, '', '#' + state.originKey + '/' + state.mode);
+  }
+
+  function urlSegments() {
+    return location.hash.replace(/^#/, '').split('/')
+      .concat(location.pathname.split('/'))
+      .filter(Boolean);
+  }
+
+  function modeFromUrl() {
+    var seg = urlSegments().filter(function (s) { return MODES[s]; })[0];
+    return seg || 'drive';
+  }
+
+  function originFromUrl() {
+    var seg = urlSegments().filter(function (s) { return ORIGINS[s]; })[0];
+    if (seg) return seg;
+    try {
+      var saved = localStorage.getItem('origin-key');
+      if (ORIGINS[saved]) return saved;
+    } catch (e) {}
+    return DEFAULT_ORIGIN;
   }
 
   function setMode(modeKey, updateUrl) {
@@ -495,20 +570,42 @@
     });
     document.getElementById('traffic-panel').hidden = (modeKey !== 'drive');
 
-    if (updateUrl !== false) {
-      // Hash-based so it works when hosted under a subpath (e.g. GitHub Pages).
-      history.replaceState(null, '', '#' + modeKey);
-    }
+    if (updateUrl !== false) updateHash();
     if (state.origin) renderActiveMode();
   }
 
-  function modeFromUrl() {
-    // Last path segment, so /drive and /mgt656-hw2/drive both work.
-    var seg = location.pathname.split('/').filter(Boolean).pop() || '';
-    var hash = location.hash.replace(/^#/, '');
-    if (MODES[hash]) return hash;
-    if (MODES[seg]) return seg;
-    return 'drive';
+  function setOrigin(originKey, updateUrl) {
+    if (!ORIGINS[originKey]) originKey = DEFAULT_ORIGIN;
+    if (state.originKey === originKey && state.origin) return;
+    var def = ORIGINS[originKey];
+
+    state.originKey = originKey;
+    state.origin = null;
+    state.currentGeo = null;
+    try { localStorage.setItem('origin-key', originKey); } catch (e) {}
+
+    document.querySelectorAll('.origin-tab').forEach(function (btn) {
+      btn.setAttribute('aria-selected', String(btn.dataset.origin === originKey));
+    });
+    var nameEl = document.querySelector('.origin-name');
+    if (nameEl) nameEl.textContent = def.label;
+    if (updateUrl !== false) updateHash();
+
+    showStatus('Locating ' + def.label + '…');
+    geocodeOrigin(def).then(function (loc) {
+      if (state.originKey !== originKey) return; // switched again meanwhile
+      state.origin = loc;
+      if (homeMarker) {
+        homeMarker.setLatLng([loc.lat, loc.lon]);
+        homeMarker.setTooltipContent(markerTooltipText());
+      } else {
+        placeHomeMarker();
+      }
+      if (!state.fitted[originKey + ':' + state.mode]) {
+        map.setView([loc.lat, loc.lon], 10);
+      }
+      renderActiveMode();
+    });
   }
 
   // ------------------------------------------------------------ traffic UI
@@ -527,7 +624,7 @@
   function updateTrafficUI() {
     var f = factorsFor(state.departHour);
     readout.textContent = hourLabel(state.departHour) + ' · ' + trafficWord(f.h) +
-      (f.h > 1.01 ? ' ' + heavySectorFor(state.departHour).label : '');
+      (f.h > 1.01 ? ' ' + sectorFor(activeOrigin(), state.departHour).label : '');
     document.querySelectorAll('.preset').forEach(function (btn) {
       btn.classList.toggle('active', Number(btn.dataset.hour) === state.departHour);
     });
@@ -589,9 +686,9 @@
     applyTheme(theme);
   }
 
-  function initMap() {
+  function initMap(startDef) {
     map = L.map('map', {
-      center: [ORIGIN.fallback.lat, ORIGIN.fallback.lon],
+      center: [startDef.fallback.lat, startDef.fallback.lon],
       zoom: 10,
       minZoom: 7,
       maxBounds: [[36.4, -124.2], [39.6, -120.3]], // loose Bay Area cage
@@ -619,7 +716,7 @@
   function markerTooltipText() {
     var o = state.origin;
     var note = o.custom ? 'custom pin' : (o.approximate ? 'approximate' : 'geocoded');
-    return ORIGIN.label + ' (' + note + ' — drag pin to adjust)';
+    return activeOrigin().label + ' (' + note + ' — drag pin to adjust)';
   }
 
   function placeHomeMarker() {
@@ -637,32 +734,29 @@
     }).addTo(map).bindTooltip(markerTooltipText(), { className: 'band-tip' });
 
     // If the geocoder put the pin in the wrong spot, dragging it fixes the
-    // origin, recomputes every mode from there, and remembers the correction.
+    // origin, recomputes every mode from there, and remembers the correction
+    // (per address).
     homeMarker.on('dragend', function () {
       var p = homeMarker.getLatLng();
       state.origin = { lat: p.lat, lon: p.lng, approximate: false, custom: true };
       try {
-        localStorage.setItem(ORIGIN_OVERRIDE_KEY, JSON.stringify(state.origin));
+        localStorage.setItem(overrideKey(activeOrigin()), JSON.stringify(state.origin));
       } catch (e) {}
       homeMarker.setTooltipContent(markerTooltipText());
-      state.fitted = {};
-      prefetched = false;
+      Object.keys(state.fitted).forEach(function (k) {
+        if (k.indexOf(state.originKey + ':') === 0) delete state.fitted[k];
+      });
+      delete prefetchedOrigins[state.originKey];
       renderActiveMode();
     });
   }
 
+  var startOrigin = originFromUrl();
   initTheme();
-  initMap();
+  initMap(ORIGINS[startOrigin]);
   updateTrafficUI();
   setMode(modeFromUrl(), false);
-
-  showStatus('Locating ' + ORIGIN.label + '…');
-  geocodeOrigin().then(function (loc) {
-    state.origin = loc;
-    placeHomeMarker();
-    map.setView([loc.lat, loc.lon], 10);
-    renderActiveMode();
-  });
+  setOrigin(startOrigin, false);
 
   document.querySelectorAll('.tab').forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -670,7 +764,14 @@
     });
   });
 
+  document.querySelectorAll('.origin-tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      setOrigin(btn.dataset.origin);
+    });
+  });
+
   window.addEventListener('hashchange', function () {
-    setMode(modeFromUrl());
+    setMode(modeFromUrl(), false);
+    setOrigin(originFromUrl(), false);
   });
 })();
