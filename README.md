@@ -1,12 +1,16 @@
-# Travel-time map — 29 Windstone Dr, Marinwood
+# Bay Area travel-time map
 
-A Bay Area travel-time (isochrone) map showing how far you can get from
-**29 Windstone Dr, Marinwood (San Rafael), CA** by car, bike, or on foot.
-Each shaded band on the map is everywhere reachable within that many minutes.
+A Bay Area travel-time (isochrone) map showing how far you can get by car,
+bike, or on foot from a switchable home address: **29 Windstone Dr, Marinwood**,
+**911 Moraga Ave, Piedmont**, or **1601 Lincoln St, Berkeley**. Each shaded
+band on the map is everywhere reachable within that many minutes.
 
 ## Features
 
-- **Three tabs** — 🚗 Drive, 🚴 Bike, 🚶 Walk (also reachable at `/drive`,
+- **Origin switcher** — pick the starting address in the header; every
+  address has its own geocoding, caching, draggable-pin correction, and
+  commute geometry. Deep-linkable as `#piedmont/bike`, `#berkeley/walk`, etc.
+- **Three mode tabs** — 🚗 Drive, 🚴 Bike, 🚶 Walk (also reachable at `/drive`,
   `/bike`, `/walk`).
 - **Rush-hour modeling for driving** — instead of a simple on/off switch, a
   departure-time slider (with Off-peak / AM rush / PM rush presets) scales
